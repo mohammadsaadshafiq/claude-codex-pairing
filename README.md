@@ -5,6 +5,12 @@ claims against your actual files, and end with one best answer plus a list of wh
 
 It is a single bash script on top of the two official CLIs. No servers, no API keys of its own.
 
+![duo: Claude and Codex discussing a bug, with the human stepping in](docs/screenshot.png)
+
+*A real run on a small seeded bug: Claude opens, Codex disputes the over-claim ("sole defect", "AGREED"),
+Claude concedes it, the human asks about the empty list, and the final answer follows
+([full run](docs/screenshot-full.png)). The image is the run's output rendered in a browser, not a live terminal capture.*
+
 ## Why
 
 One model answering alone can be confidently wrong. Two models answering in parallel can share the same

@@ -27,6 +27,7 @@ else B=; N=; GY=; CY=; CL=; CX=; HU=; RD=; fi
 COLS=$(tput cols 2>/dev/null || echo 80); [ "$COLS" -gt 100 ] && COLS=100
 rule() { printf '%s' "$GY"; printf '─%.0s' $(seq 1 $((COLS-2))); printf '%s\n' "$N"; }
 pretty() { sed -E \
+  -e 's/\[([^]]+)\]\((\/|https?:)[^)]*\)/\1/g' \
   -e 's/\*\*([^*]+)\*\*/'"$B"'\1'"$N"'/g' \
   -e 's/`([^`]+)`/'"$CY"'\1'"$N"'/g' \
   -e 's/STATUS: AGREED/'"$CX$B"'◆ AGREED'"$N"'/' \
@@ -150,7 +151,7 @@ $(cat "$LOG")
 Write the final result in four short sections: 1) BEST ANSWER, 2) AGREED & VERIFIED (with file:line), 3) STILL DISPUTED OR UNVERIFIED, 4) HOW THE USER SHOULD VERIFY THE REST (concrete commands/checks). Mention what the HUMAN decided or steered, if anything. Do not invent anything that was not in the discussion or the files.")"
 [ -t 2 ] && printf '\r\033[K' >&2
 printf '\n%s%s★ FINAL ANSWER%s\n' "$HU" "$B" "$N"; rule
-printf '%s\n' "$FINAL" | sed -E 's/^## /▸ /' | pretty
+printf '%s\n' "$FINAL" | sed -E 's/^#+ /▸ /' | pretty
 
 mkdir -p "$HOME/.duo"; OUT="$HOME/.duo/$(date +%Y%m%d-%H%M%S).md"
 { printf '# duo: %s\n\n## Discussion\n%s\n\n## Final answer\n\n%s\n' "$Q" "$(cat "$LOG")" "$FINAL"; } > "$OUT"
