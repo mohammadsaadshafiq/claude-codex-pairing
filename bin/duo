@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# duo: Claude and Codex DISCUSS a question in turns, check each other's claims against the files
+# (read-only), until they agree or run out of rounds. Then a final answer.
+# usage: duo [-r ROUNDS] "question"     (run inside the project folder; default 3 rounds each)
+set -euo pipefail
+R=3; [ "${1:-}" = "-r" ] && { R="$2"; shift 2; }
+Q="${*:?usage: duo [-r ROUNDS] \"question\"}"
+T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT; LOG="$T/log"; : > "$LOG"
+
+claude_say() { printf "%s" "$1" | perl -e 'alarm 240; exec @ARGV' claude -p --permission-mode plan --allowedTools "Read,Grep,Glob" 2>&1 || echo "(claude gave no answer: timeout or error)"; }
+codex_say()  { perl -e 'alarm 240; exec @ARGV' codex exec -s read-only --ephemeral --skip-git-repo-check -o "$T/cx" "$1" </dev/null >/dev/null 2>&1 || echo "(codex gave no answer: timeout or error)" > "$T/cx"; cat "$T/cx"; }
+
+RULES="You are in a discussion with another engineer (an AI). You may only READ files in this folder; never edit.
+Rules: (1) Verify every factual claim you make or dispute against the actual files and cite file:line.
+(2) Say 'not verified' for anything you did not check. (3) Do not agree just to be polite; push back with evidence.
+(4) Concede openly when the other is right. (5) Be concise: max 250 words.
+End your message with exactly one line: STATUS: AGREED (nothing material left in dispute) or STATUS: DISPUTED (and what)."
+
+turn() { # name fn prompt-instruction
+  local who="$1" fn="$2" instr="$3" out
+  out="$($fn "$RULES
+
+QUESTION: $Q
+
+DISCUSSION SO FAR:
+$(cat "$LOG")
+
+YOUR TURN ($who): $instr")"
+  printf '\n━━━ %s ━━━\n%s\n' "$who" "$out" | tee -a "$LOG"
+  printf '%s' "$out" | tail -n 3 | grep -q 'STATUS: AGREED'
+}
+
+echo "Question: $Q"
+turn CLAUDE claude_say "Open with your answer to the question, with evidence." || true
+for i in $(seq 1 "$R"); do
+  a=0
+  turn CODEX codex_say "Check each of Claude's claims (CORRECT/WRONG/UNVERIFIED), then give your own answer and add what is missing." && a=$((a+1)) || true
+  turn CLAUDE claude_say "Check each of Codex's claims the same way, concede what is right, defend what is right with evidence." && a=$((a+1)) || true
+  [ "$a" -eq 2 ] && { echo; echo "(both agreed after round $i)"; break; }
+done
+
+echo; echo "━━━ FINAL (Claude, summarising the discussion) ━━━"
+claude_say "$RULES
+
+QUESTION: $Q
+
+FULL DISCUSSION:
+$(cat "$LOG")
+
+Write the final result in four short sections: 1) BEST ANSWER, 2) AGREED & VERIFIED (with file:line), 3) STILL DISPUTED OR UNVERIFIED, 4) HOW THE USER SHOULD VERIFY THE REST (concrete commands/checks). Do not invent anything that was not in the discussion or the files."
