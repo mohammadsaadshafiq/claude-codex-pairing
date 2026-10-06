@@ -1,37 +1,43 @@
 # claude-codex-pairing
 
-`duo` lets two coding agents, Claude Code and OpenAI Codex, **discuss a question in turns**, check each other's
-claims against your actual files, and end with one best answer plus a list of what is still unverified.
+**`duo`** makes two coding agents, Claude Code and OpenAI Codex, work on your question together: they answer
+separately, then check each other's claims against your actual files, then each writes its own final answer.
+You stay in the loop the whole time and can step in, steer, or stop.
 
-It is a single bash script on top of the two official CLIs. No servers, no API keys of its own.
+It is one bash script on top of the two official CLIs. No servers, no API keys of its own.
 
-![duo: Claude and Codex discussing a bug, with the human stepping in](docs/screenshot.png)
+![duo start screen with all commands](docs/start-screen.png)
 
-*A real run on a small seeded bug: Claude opens, Codex disputes the over-claim ("sole defect", "AGREED"),
-Claude concedes it, the human asks about the empty list, and the final answer follows
-([full run](docs/screenshot-full.png)). The image is the run's output rendered in a browser, not a live terminal capture.*
+## How a run works
 
-## Why
+| Phase | What happens |
+|---|---|
+| ① **Blind answers** | Claude and Codex answer **separately and in parallel**. Neither can see the other, so neither anchors on the other. |
+| ② **Cross-check** | They take turns. Each marks the other's claims `✔ CORRECT` / `✘ WRONG` / `? UNVERIFIED` with `file:line` evidence, answers your notes, and **must name one thing that could be wrong in its own position**. Who goes first is random. |
+| ③ **Two finals** | Each writes its **own** final answer, separately, so neither model judges the other's. Where the two finals differ, you check it yourself. |
 
-One model answering alone can be confidently wrong. Two models answering in parallel can share the same
-blind spot. `duo` makes them argue instead: every claim gets marked CORRECT, WRONG or UNVERIFIED with
-`file:line` evidence, and each side has to concede or defend.
+A live status line shows which agent is still working and for how long, and the run ends with a process summary
+(time per phase, number of model calls). Both agents are **read-only**: Claude with `--permission-mode plan` and
+Read/Grep/Glob only, Codex with `-s read-only`.
 
-## How it works
+![duo discussing a bug with the human stepping in](docs/screenshot.png)
 
-1. Claude opens with an answer and evidence.
-2. Codex checks each claim, answers, and adds what is missing.
-3. Claude checks Codex the same way, concedes what is right, defends what is right.
-4. Steps 2 and 3 repeat until both end with `STATUS: AGREED` or the round limit is reached.
-5. A final summary lists: best answer, agreed and verified, still disputed or unverified, and concrete
-   commands to verify the rest yourself.
+*A real run on a small seeded bug ([full run](docs/screenshot-full.png)): both blind answers, Claude and Codex
+cross-checking, the human asking about the empty list, then the two finals. In the cross-check Codex retracted its own
+unconditional "No" as an over-claim. The images are the run's output rendered in a browser, not live terminal captures.*
 
-You stay in the loop: after every turn `duo` pauses and you can press Enter to continue, type a note that
-joins the discussion (both agents must answer it, and still verify any facts in it), press `s` to stop and
-summarise, or `q` to quit. A size gauge warns you when the argument is getting too big, and `-m` sets a hard limit.
+## You in the loop
 
-Both agents run **read-only**: Claude with `--permission-mode plan` and the tools Read, Grep and Glob,
-Codex with `-s read-only`. Each turn has a 240 second limit.
+After every turn `duo` pauses:
+
+| Key | Effect |
+|---|---|
+| `Enter` | continue |
+| any text | your note joins the discussion; both agents must answer it, and still verify any facts in it |
+| `s` | stop and write the finals |
+| `q` | quit without finals |
+
+A size gauge warns when the argument is getting too big; `-m` sets a hard limit.
 
 ## Install
 
@@ -43,37 +49,51 @@ cd claude-codex-pairing && ./install.sh
 ```
 
 The installer copies `duo` to `~/.local/bin`, adds that folder to your PATH in `~/.zshrc` or `~/.bashrc` if needed
-(only once), and runs `duo --doctor` to check your setup. Open a new terminal afterwards.
+(once), and runs `duo --doctor`. Open a new terminal afterwards.
 
-## Use
+## Commands
 
-Run it inside the project you want to discuss:
+```text
+duo                      start screen with all commands, then asks what to discuss
+duo "your question"      start a discussion (run it inside your project folder)
 
-```bash
-duo "Is the token refresh in auth.ts safe against a race?"
-duo -r 4 "Does this migration lose data on rollback?"   # up to 4 rounds (default 5)
-duo -m 8000 "..."                                        # warn and stop when the argument exceeds 8000 chars
-duo -a "..."                                             # automatic, no pauses
-duo --doctor                                             # check installation
+-r, --rounds N           cross-check rounds, each = both agents speak once (default 5)
+-m, --max N              warn and stop when the argument passes N characters (default 15000)
+-f, --fast               quicker: low reasoning effort, 2 rounds
+-a, --auto               no pauses; stops on agreement, round limit or size limit
+
+duo --doctor             check that claude, codex and perl are installed
+duo --history            list your last 10 saved discussions
+duo --last               print the most recent saved discussion
+duo --help | --version
 ```
 
-Every run is saved as Markdown in `~/.duo/`; copy it with `pbcopy < ~/.duo/<file>.md`.
+Every run is saved as Markdown in `~/.duo/` (copy with `pbcopy < ~/.duo/<file>.md`).
 Colours are off when output is piped or `NO_COLOR=1` is set.
+
+## Why it can be slow
+
+Every turn is a full agent session (start the CLI, read files with tools, think, answer), turns in phase ② run one
+after another, and later turns resend the whole discussion. Codex at high reasoning effort is slower than Claude.
+`--fast` lowers the reasoning effort and limits the rounds; the two blind answers and the two finals already run in
+parallel. A typical `--fast` run on a tiny project took about 1.5 minutes for 6 model calls.
 
 ## Shared instructions (recommended)
 
-Codex reads `AGENTS.md`, Claude Code reads `CLAUDE.md`. Keep one source of truth: put your rules in
-`AGENTS.md` and make `CLAUDE.md` contain the single line `@AGENTS.md`. See [`examples/`](examples).
+Codex reads `AGENTS.md`, Claude Code reads `CLAUDE.md`. Keep one source of truth: put your rules in `AGENTS.md`
+and make `CLAUDE.md` contain the single line `@AGENTS.md`. See [`examples/`](examples).
 
 ## Limits, stated plainly
 
-- Agreement is not proof. Two models can agree and both be wrong. The final section tells you what to run yourself.
-- Because both agents are read-only, neither can run your code or tests. Claims about behaviour are hand traces
-  until you execute them.
-- A model can mark `STATUS: AGREED` too early. Read the discussion, not only the verdict.
-- It makes several model calls per question, so it uses more of your quota than a single answer.
-- Tested so far on small seeded-bug examples (an off-by-one in a loop), not yet on large real codebases.
-- The human pauses were tested with scripted input, not by typing in a live terminal.
+- Agreement is not proof. Two models can agree and both be wrong. Each final answer ends with what to run yourself.
+- Both agents are read-only, so neither can run your code or tests. Claims about behaviour are hand traces until you
+  execute them.
+- The blind round and the random order reduce, but do not remove, the tendency of a model to agree with an answer
+  that is already on the page. Read the discussion, not only the `AGREED` label.
+- Several model calls per question use more of your quota than a single answer.
+- Tested on small seeded-bug examples (an off-by-one in a loop), not yet on large real codebases.
+- The human pauses were tested with scripted input, and the live status line under a pseudo-terminal, not by hand
+  in a real terminal session.
 
 ## Related projects
 

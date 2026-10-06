@@ -1,23 +1,9 @@
 #!/usr/bin/env bash
-# duo: Claude and Codex DISCUSS a question in turns and check each other's claims against the files
-# (read-only). A human sits in the loop: after every turn you can continue, add a note, or stop.
+# duo: Claude Code and Codex answer a question separately (blind), then cross-check each other's
+# claims against your files (read-only), then each writes its own final answer. You stay in the loop.
 set -euo pipefail
-
-usage() { cat <<'U'
-duo: let Claude Code and Codex discuss a question, with you in the loop.
-
-  duo [-r ROUNDS] [-m MAXCHARS] [-a] "question"     run inside the project folder
-  duo --doctor                                       check that everything is installed
-
-  -r N   maximum rounds; one round = Codex + Claude each speak once (default 5)
-  -m N   warn / stop when the discussion exceeds N characters (default 15000)
-  -a     automatic mode, no pauses (stops on agreement, round limit or size limit)
-
-At each pause:  Enter = continue | any text = your note joins the discussion
-                s = stop and summarise | q = quit without summary
-Every run is saved as Markdown in ~/.duo/ so you can copy it.  NO_COLOR=1 turns colours off.
-U
-}
+VERSION=0.2.0
+DUO_HOME="$HOME/.duo"
 
 # ---------- look & feel ----------
 if { [ -t 1 ] || [ -n "${DUO_COLOR:-}" ]; } && [ -z "${NO_COLOR:-}" ]; then
@@ -26,8 +12,9 @@ if { [ -t 1 ] || [ -n "${DUO_COLOR:-}" ]; } && [ -z "${NO_COLOR:-}" ]; then
 else B=; N=; GY=; CY=; CL=; CX=; HU=; RD=; fi
 COLS=$(tput cols 2>/dev/null || echo 80); [ "$COLS" -gt 100 ] && COLS=100
 rule() { printf '%s' "$GY"; printf '─%.0s' $(seq 1 $((COLS-2))); printf '%s\n' "$N"; }
+fmt() { if [ "$1" -ge 60 ]; then printf '%sm%02ds' "$(($1/60))" "$(($1%60))"; else printf '%ss' "$1"; fi; }
 pretty() { sed -E \
-  -e 's/\[([^]]+)\]\((\/|https?:)[^)]*\)/\1/g' \
+  -e 's/\[([^]]+)\]\(<?(\/|https?:|file:)[^)]*\)/\1/g' \
   -e 's/\*\*([^*]+)\*\*/'"$B"'\1'"$N"'/g' \
   -e 's/`([^`]+)`/'"$CY"'\1'"$N"'/g' \
   -e 's/STATUS: AGREED/'"$CX$B"'◆ AGREED'"$N"'/' \
@@ -42,61 +29,174 @@ gauge() { # size max -> ▰▰▱▱▱ 4,960 / 15,000
   printf '%s %s / %s chars' "$N" "$s" "$m"
 }
 
-# ---------- doctor ----------
-if [ "${1:-}" = "--doctor" ]; then
-  ok=1
-  for t in claude codex perl; do
-    if command -v "$t" >/dev/null; then printf '%s✔%s %s found\n' "$CX" "$N" "$t"
-    else printf '%s✘%s %s missing\n' "$RD" "$N" "$t"; ok=0; fi
-  done
-  [ -t 0 ] && printf '%s✔%s terminal for the human pauses\n' "$CX" "$N" || printf '%s?%s no terminal here: duo will run with -a\n' "$HU" "$N"
-  printf '\nNot checked here: whether claude and codex are logged in. Try:  claude -p "hi"   and   codex exec "hi"\n'
-  [ "$ok" = 1 ] && exit 0 || exit 1
-fi
-[ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ] && { usage; exit 0; }
+banner() {
+  local d1 d2 d3 d4 d5 d6 u1 u2 u3 u4 u5 u6 o1 o2 o3 o4 o5 o6
+  d1='██████╗ ';  d2='██╔══██╗'; d3='██║  ██║'; d4='██║  ██║'; d5='██████╔╝'; d6='╚═════╝ '
+  u1='██╗   ██╗'; u2='██║   ██║'; u3='██║   ██║'; u4='██║   ██║'; u5='╚██████╔╝'; u6=' ╚═════╝ '
+  o1=' ██████╗ '; o2='██╔═══██╗'; o3='██║   ██║'; o4='██║   ██║'; o5='╚██████╔╝'; o6=' ╚═════╝ '
+  echo
+  printf '  %s%s%s%s%s%s%s\n' "$CL" "$d1" "$u1" "$CX" "$o1" "$N" ""
+  printf '  %s%s%s%s%s%s\n' "$CL" "$d2" "$u2" "$CX" "$o2" "$N"
+  printf '  %s%s%s%s%s%s\n' "$CL" "$d3" "$u3" "$CX" "$o3" "$N"
+  printf '  %s%s%s%s%s%s\n' "$CL" "$d4" "$u4" "$CX" "$o4" "$N"
+  printf '  %s%s%s%s%s%s\n' "$CL" "$d5" "$u5" "$CX" "$o5" "$N"
+  printf '  %s%s%s%s%s%s\n' "$CL" "$d6" "$u6" "$CX" "$o6" "$N"
+  printf '\n  %s●%s Claude Code  %s⇄%s  %s●%s Codex   %s· you in the loop · v%s%s\n' "$CL" "$N" "$GY" "$N" "$CX" "$N" "$GY" "$VERSION" "$N"
+}
 
-R=5; AUTO=0; MAX=15000
+help_text() {
+  cat <<EOF
+
+  ${B}USAGE${N}
+    ${CY}duo${N}                          this screen, then asks what to discuss
+    ${CY}duo "your question"${N}          start a discussion (run it inside your project folder)
+
+  ${B}OPTIONS${N}
+    ${CY}-r, --rounds N${N}               cross-check rounds, each = both agents speak once   ${GY}(default 5)${N}
+    ${CY}-m, --max N${N}                  warn and stop when the argument passes N characters ${GY}(default 15000)${N}
+    ${CY}-f, --fast${N}                   quicker: low reasoning effort, 2 rounds
+    ${CY}-a, --auto${N}                   no pauses; stops on agreement, round limit or size limit
+
+  ${B}COMMANDS${N}
+    ${CY}duo --doctor${N}                 check that claude, codex and perl are installed
+    ${CY}duo --history${N}                list your last 10 saved discussions
+    ${CY}duo --last${N}                   print the most recent saved discussion
+    ${CY}duo --help${N}  ${CY}duo --version${N}
+
+  ${B}HOW A RUN WORKS${N}
+    ${CL}①${N} ${B}Blind answers${N}    Claude and Codex answer separately, in parallel, and cannot see each other
+    ${CL}②${N} ${B}Cross-check${N}      they take turns marking each other's claims ${CX}✔ CORRECT${N} / ${RD}✘ WRONG${N} / ${HU}? UNVERIFIED${N}
+    ${CL}③${N} ${B}Two finals${N}       each writes its own final answer, so neither one judges the other
+    Both are read-only: they can read your files but never change them.
+
+  ${B}WHEN IT PAUSES (YOUR TURN)${N}
+    ${HU}Enter${N} continue   ${HU}type text${N} add your note   ${HU}s${N} stop and write finals   ${HU}q${N} quit
+
+  ${GY}Every run is saved in ~/.duo/ · NO_COLOR=1 turns colours off${N}
+EOF
+}
+
+# ---------- commands that do not start a discussion ----------
+case "${1:-}" in
+  --doctor)
+    ok=1
+    for t in claude codex perl; do
+      if command -v "$t" >/dev/null; then printf '%s✔%s %s found\n' "$CX" "$N" "$t"
+      else printf '%s✘%s %s missing\n' "$RD" "$N" "$t"; ok=0; fi
+    done
+    if [ -t 0 ]; then printf '%s✔%s terminal for the human pauses\n' "$CX" "$N"; else printf '%s?%s no terminal here: duo will run with --auto\n' "$HU" "$N"; fi
+    printf '\nNot checked here: whether claude and codex are logged in. Try:  claude -p "hi"   and   codex exec "hi"\n'
+    [ "$ok" = 1 ] && exit 0 || exit 1 ;;
+  --history)
+    ls -1t "$DUO_HOME"/*.md 2>/dev/null | head -10 | while read -r f; do printf '%s  %s\n' "$(basename "$f" .md)" "$(head -1 "$f" | cut -c1-80)"; done
+    exit 0 ;;
+  --last)
+    f="$(ls -1t "$DUO_HOME"/*.md 2>/dev/null | head -1)"; [ -n "$f" ] && cat "$f" || echo "no saved discussions yet"
+    exit 0 ;;
+  --version) echo "duo $VERSION"; exit 0 ;;
+  -h|--help) banner; help_text; exit 0 ;;
+esac
+
+R=5; RSET=0; AUTO=0; MAX=15000; FAST=0
 while [ $# -gt 0 ]; do
-  case "$1" in -r) R="$2"; shift 2;; -m) MAX="$2"; shift 2;; -a) AUTO=1; shift;; *) break;; esac
+  case "$1" in
+    -r|--rounds) R="$2"; RSET=1; shift 2;;
+    -m|--max)    MAX="$2"; shift 2;;
+    -a|--auto)   AUTO=1; shift;;
+    -f|--fast)   FAST=1; shift;;
+    *) break;;
+  esac
 done
-[ $# -gt 0 ] || { usage; exit 1; }
-Q="$*"
+[ "$FAST" = 1 ] && [ "$RSET" = 0 ] && R=2
 TTY="${DUO_TTY:-/dev/tty}"
+
+if [ $# -eq 0 ]; then
+  banner; help_text
+  if { exec 4< "$TTY"; } 2>/dev/null; then
+    printf '\n  %s❓ What should Claude and Codex discuss?%s %s(Enter to leave)%s\n  %s▶%s ' "$B" "$N" "$GY" "$N" "$HU" "$N"
+    IFS= read -r -u 4 Q || Q=""
+    [ -n "$Q" ] || exit 0
+  else exit 0; fi
+else
+  Q="$*"
+fi
+
 if [ "$AUTO" = 0 ]; then
-  if { exec 3< "$TTY"; } 2>/dev/null; then :; else echo "${HU}(no terminal: running automatically, -a)${N}"; AUTO=1; fi
+  if { exec 3< "$TTY"; } 2>/dev/null; then :; else echo "${HU}(no terminal: running automatically, --auto)${N}"; AUTO=1; fi
 fi
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT; LOG="$T/log"; : > "$LOG"
-STREAK=0; NOSUMMARY=0
+STREAK=0; NOSUMMARY=0; CALLS=0; TURNS=0
 
-claude_say() { printf "%s" "$1" | perl -e 'alarm 240; exec @ARGV' claude -p --permission-mode plan --allowedTools "Read,Grep,Glob" 2>&1 || echo "(claude gave no answer: timeout or error)"; }
-codex_say()  { perl -e 'alarm 240; exec @ARGV' codex exec -s read-only --ephemeral --skip-git-repo-check -o "$T/cx" "$1" </dev/null >/dev/null 2>&1 || echo "(codex gave no answer: timeout or error)" > "$T/cx"; cat "$T/cx"; }
+# ---------- the two agents (read-only) ----------
+CL_EXTRA=(); CX_EXTRA=()
+[ "$FAST" = 1 ] && { CL_EXTRA=(--effort low); CX_EXTRA=(-c 'model_reasoning_effort="low"'); }
+claude_say() { printf "%s" "$1" | perl -e 'alarm 300; exec @ARGV' claude -p --permission-mode plan --allowedTools "Read,Grep,Glob" ${CL_EXTRA[@]+"${CL_EXTRA[@]}"} 2>&1 || echo "(claude gave no answer: timeout or error)"; }
+codex_say()  { local f; f="$(mktemp "$T/cx.XXXXXX")"
+  perl -e 'alarm 300; exec @ARGV' codex exec -s read-only --ephemeral --skip-git-repo-check ${CX_EXTRA[@]+"${CX_EXTRA[@]}"} -o "$f" "$1" </dev/null >/dev/null 2>&1 || echo "(codex gave no answer: timeout or error)" > "$f"; cat "$f"; }
 
-RULES="You are in a discussion with another engineer (an AI) and a human who supervises. You may only READ files in this folder; never edit.
+RULES="You are one of two engineers (AIs) discussing a question, with a human who supervises. You may only READ files in this folder; never edit.
 Rules: (1) Verify every factual claim you make or dispute against the actual files and cite file:line.
 (2) Say 'not verified' for anything you did not check. (3) Do not agree just to be polite; push back with evidence.
 (4) Concede openly when the other is right. (5) Be concise: max 250 words.
-(6) Entries from HUMAN come from the person you work for: answer them first and follow their direction, but still verify any checkable fact they state.
-End your message with exactly one line: STATUS: AGREED (nothing material left in dispute) or STATUS: DISPUTED (and what)."
+(6) Entries from HUMAN come from the person you work for: answer them first and follow their direction, but still verify any checkable fact they state."
 
-turn() { # name fn instruction color
-  local who="$1" fn="$2" instr="$3" col="$4" out t0=$SECONDS
-  [ -t 2 ] && printf '\r%s◔ %s is checking the files…%s' "$GY" "$who" "$N" >&2
-  out="$($fn "$RULES
+# live status line: watch "Claude:pid" "Codex:pid"  -> sets D0 D1 (seconds each took)
+watch() {
+  local t0=$SECONDS item n p line live i
+  local -a dt=()
+  while :; do
+    line=""; live=0; i=0
+    for item in "$@"; do
+      n=${item%%:*}; p=${item##*:}
+      if [ -z "${dt[$i]:-}" ] && ! kill -0 "$p" 2>/dev/null; then dt[$i]=$((SECONDS-t0)); fi
+      if [ -n "${dt[$i]:-}" ]; then line="$line  ${CX}✔${N} $n $(fmt "${dt[$i]}")"
+      else line="$line  ${HU}◔${N} $n $(fmt $((SECONDS-t0)))…"; live=1; fi
+      i=$((i+1))
+    done
+    [ -t 2 ] && printf '\r\033[K%s' "$line" >&2
+    [ "$live" = 0 ] && break
+    sleep 1
+  done
+  [ -t 2 ] && printf '\r\033[K' >&2
+  D0=${dt[0]:-0}; D1=${dt[1]:-0}
+}
+
+show() { # who colour time text
+  printf '\n%s%s● %s%s  %s· %s%s\n' "$2" "$B" "$1" "$N" "$GY" "$3" "$N"; rule
+  printf '%s\n' "$4" | pretty
+}
+
+strip() { # current phase 1..3
+  local i s="" names=("Blind answers" "Cross-check" "Two finals") glyph=("①" "②" "③") m
+  for i in 1 2 3; do
+    if [ "$i" -lt "$1" ]; then m="${CX}✔${N}"; elif [ "$i" -eq "$1" ]; then m="${HU}◔${N}"; else m="${GY}○${N}"; fi
+    s="$s  $m ${glyph[$((i-1))]} ${names[$((i-1))]}"
+    [ "$i" -lt 3 ] && s="$s ${GY}→${N}"
+  done
+  printf '%s\n' "$s"
+}
+phase() { printf '\n%s%s━━ %s %s ━━%s\n%s   %s%s\n' "$HU" "$B" "$1" "$2" "$N" "$GY" "$3" "$N"; strip "$4"; }
+
+# one agent speaks in the cross-check phase -> sets OUT, DT
+one_turn() { # who instr
+  local who="$1" instr="$2" fn col p
+  if [ "$who" = CLAUDE ]; then fn=claude_say; col=$CL; else fn=codex_say; col=$CX; fi
+  "$fn" "$RULES
 
 QUESTION: $Q
 
 DISCUSSION SO FAR:
 $(cat "$LOG")
 
-YOUR TURN ($who): $instr")"
-  [ -t 2 ] && printf '\r\033[K' >&2
-  printf '\n━━━ %s ━━━\n%s\n' "$who" "$out" >> "$LOG"
-  printf '\n%s%s● %s%s  %s· %ss%s\n' "$col" "$B" "$who" "$N" "$GY" "$((SECONDS-t0))" "$N"; rule
-  printf '%s\n' "$out" | pretty
-  if printf '%s' "$out" | tail -n 3 | grep -q 'STATUS: AGREED'; then STREAK=$((STREAK+1)); else STREAK=0; fi
+YOUR TURN ($who): $instr" > "$T/one" & p=$!
+  watch "$who:$p"; wait "$p" 2>/dev/null || true
+  OUT="$(cat "$T/one")"; DT=$D0; CALLS=$((CALLS+1)); TURNS=$((TURNS+1))
+  printf '\n━━━ %s ━━━\n%s\n' "$who" "$OUT" >> "$LOG"
+  show "$who" "$col" "$(fmt "$DT")" "$OUT"
+  if printf '%s' "$OUT" | tail -n 3 | grep -q 'STATUS: AGREED'; then STREAK=$((STREAK+1)); else STREAK=0; fi
 }
 
-# returns 0 = continue, 1 = stop (summarise)
+# returns 0 = continue, 1 = stop (write finals)
 ask_human() {
   local size ans big=0; size=$(wc -c < "$LOG" | tr -d ' ')
   [ "$size" -gt "$MAX" ] && big=1
@@ -109,7 +209,7 @@ ask_human() {
     printf '%s│%s  size  %s\n' "$HU" "$N" "$(gauge "$size" "$MAX")"
     [ "$big" = 1 ] && printf '%s│%s  %s⚠ the discussion is getting big, consider stopping (s)%s\n' "$HU" "$N" "$RD" "$N"
     [ "$STREAK" -ge 2 ] && printf '%s│%s  %s◆ both agents say AGREED%s: Enter to finish, or challenge them with a note\n' "$HU" "$N" "$CX" "$N"
-    printf '%s│%s  %s⏎ continue · type a note · s stop+summarise · q quit%s\n' "$HU" "$N" "$GY" "$N"
+    printf '%s│%s  %s⏎ continue · type a note · s stop+finals · q quit%s\n' "$HU" "$N" "$GY" "$N"
     printf '%s╰─▶%s ' "$HU" "$N"; } >&2
   IFS= read -r -u 3 ans || ans=s
   case "$ans" in
@@ -121,38 +221,97 @@ ask_human() {
   esac
 }
 
+# ======================= run =======================
+START=$SECONDS
 echo
 printf '%s╭─ %sduo%s  %s●%s Claude %s⇄%s %s●%s Codex  %s· you in the loop%s\n' "$GY" "$B" "$N" "$CL" "$N" "$GY" "$N" "$CX" "$N" "$GY" "$N"
 printf '%s│%s  ❓ %s%s%s\n' "$GY" "$N" "$B" "$Q" "$N"
-printf '%s╰─ read-only · max %s rounds · size limit %s chars%s\n' "$GY" "$R" "$MAX" "$N"
-turn CLAUDE claude_say "Open with your answer to the question, with evidence." "$CL"; STREAK=0
-stop=0
-for i in $(seq 1 "$R"); do
-  for who in CODEX CLAUDE; do
-    ask_human || { stop=1; break 2; }
-    if [ "$who" = CODEX ]; then
-      turn CODEX codex_say "Check each of Claude's claims (CORRECT/WRONG/UNVERIFIED), answer any HUMAN note, give your own answer, add what is missing." "$CX"
-    else
-      turn CLAUDE claude_say "Check each of Codex's claims the same way, answer any HUMAN note, concede what is right, defend what is right with evidence." "$CL"
-    fi
-  done
-done
-[ "$stop" = 0 ] && printf '\n%s■ round limit %s reached%s\n' "$HU" "$R" "$N"
+printf '%s╰─ read-only · max %s rounds · size limit %s chars%s%s\n' "$GY" "$R" "$MAX" "$([ "$FAST" = 1 ] && echo ' · fast mode')" "$N"
 
-[ "$NOSUMMARY" = 1 ] && { echo "(quit without summary)"; exit 0; }
-[ -t 2 ] && printf '\r%s◔ writing the final answer…%s' "$GY" "$N" >&2
-FINAL="$(claude_say "$RULES
+# ---- phase 1: blind answers, in parallel ----
+phase "①" "BLIND ANSWERS" "both answer separately and in parallel, neither can see the other" 1
+S1=$SECONDS
+BLIND="BLIND ROUND: the other engineer is answering separately right now. You cannot see their answer; do not guess it. Give your own answer to the question with evidence from the files."
+claude_say "$RULES
+
+QUESTION: $Q
+
+$BLIND" > "$T/pc" & PC=$!
+codex_say "$RULES
+
+QUESTION: $Q
+
+$BLIND" > "$T/px" & PX=$!
+watch "Claude:$PC" "Codex:$PX"; DC=$D0; DX=$D1
+wait "$PC" 2>/dev/null || true; wait "$PX" 2>/dev/null || true
+CALLS=$((CALLS+2))
+OC="$(cat "$T/pc")"; OX="$(cat "$T/px")"
+printf '\n━━━ CLAUDE (blind) ━━━\n%s\n\n━━━ CODEX (blind) ━━━\n%s\n' "$OC" "$OX" >> "$LOG"
+show "CLAUDE (blind)" "$CL" "$(fmt "$DC")" "$OC"
+show "CODEX (blind)" "$CX" "$(fmt "$DX")" "$OX"
+P1=$((SECONDS-S1)); STREAK=0
+
+# ---- phase 2: cross-check, alternating order ----
+stop=0; S2=$SECONDS
+if ask_human; then
+  phase "②" "CROSS-CHECK" "they take turns checking each other's claims against the files" 2
+  if [ $((RANDOM % 2)) -eq 0 ]; then ORDER="CODEX CLAUDE"; else ORDER="CLAUDE CODEX"; fi
+  printf '%s   %s checks first (random, so neither model always reacts first)%s\n' "$GY" "${ORDER%% *}" "$N"
+  FIRST=1
+  for i in $(seq 1 "$R"); do
+    for who in $ORDER; do
+      if [ "$FIRST" = 1 ]; then FIRST=0; else ask_human || { stop=1; break 2; }; fi
+      [ "$who" = CLAUDE ] && other=Codex || other=Claude
+      one_turn "$who" "CROSS-CHECK. Read the latest message from $other (and the blind answers). (a) Mark each of its claims CORRECT / WRONG / UNVERIFIED with evidence. (b) Answer any HUMAN note. (c) Add what is missing. (d) Name ONE thing in your OWN position that could be wrong or that you would still challenge. End with exactly one line: STATUS: AGREED only if you checked their key claims yourself and nothing material is disputed, otherwise STATUS: DISPUTED (and what)."
+    done
+  done
+  [ "$stop" = 0 ] && printf '\n%s■ round limit %s reached%s\n' "$HU" "$R" "$N"
+else
+  [ "$NOSUMMARY" = 1 ] || stop=1
+fi
+P2=$((SECONDS-S2))
+
+[ "$NOSUMMARY" = 1 ] && { echo "(quit without finals)"; exit 0; }
+
+# ---- phase 3: two finals, in parallel ----
+phase "③" "TWO FINALS" "each writes its own final answer, separately, so neither judges the other" 3
+S3=$SECONDS
+FINALQ="Write YOUR OWN final result from the full discussion. The other engineer writes theirs separately; do not hedge to match them. Four short sections: 1) BEST ANSWER, 2) AGREED & VERIFIED (with file:line), 3) STILL DISPUTED OR UNVERIFIED, 4) HOW THE USER SHOULD VERIFY THE REST (concrete commands or checks). Mention what the HUMAN decided or steered, if anything. Do not invent anything that is not in the discussion or the files. Max 300 words."
+claude_say "$RULES
 
 QUESTION: $Q
 
 FULL DISCUSSION:
 $(cat "$LOG")
 
-Write the final result in four short sections: 1) BEST ANSWER, 2) AGREED & VERIFIED (with file:line), 3) STILL DISPUTED OR UNVERIFIED, 4) HOW THE USER SHOULD VERIFY THE REST (concrete commands/checks). Mention what the HUMAN decided or steered, if anything. Do not invent anything that was not in the discussion or the files.")"
-[ -t 2 ] && printf '\r\033[K' >&2
-printf '\n%s%s★ FINAL ANSWER%s\n' "$HU" "$B" "$N"; rule
-printf '%s\n' "$FINAL" | sed -E 's/^#+ /▸ /' | pretty
+$FINALQ" > "$T/fc" & FC=$!
+codex_say "$RULES
 
-mkdir -p "$HOME/.duo"; OUT="$HOME/.duo/$(date +%Y%m%d-%H%M%S).md"
-{ printf '# duo: %s\n\n## Discussion\n%s\n\n## Final answer\n\n%s\n' "$Q" "$(cat "$LOG")" "$FINAL"; } > "$OUT"
-printf '\n%s💾 saved %s   copy: pbcopy < %s%s\n' "$GY" "$OUT" "$OUT" "$N"
+QUESTION: $Q
+
+FULL DISCUSSION:
+$(cat "$LOG")
+
+$FINALQ" > "$T/fx" & FX=$!
+watch "Claude:$FC" "Codex:$FX"; DFC=$D0; DFX=$D1
+wait "$FC" 2>/dev/null || true; wait "$FX" 2>/dev/null || true
+CALLS=$((CALLS+2))
+FCL="$(cat "$T/fc")"; FCX="$(cat "$T/fx")"
+P3=$((SECONDS-S3))
+printf '\n%s%s★ FINAL ANSWER · Claude%s  %s· %s%s\n' "$CL" "$B" "$N" "$GY" "$(fmt "$DFC")" "$N"; rule
+printf '%s\n' "$FCL" | sed -E 's/^#+ /▸ /' | pretty
+printf '\n%s%s★ FINAL ANSWER · Codex%s  %s· %s%s\n' "$CX" "$B" "$N" "$GY" "$(fmt "$DFX")" "$N"; rule
+printf '%s\n' "$FCX" | sed -E 's/^#+ /▸ /' | pretty
+printf '\n%sThe two finals were written separately. Where they differ, check it yourself.%s\n' "$GY" "$N"
+
+# ---- process summary + save ----
+TOTAL=$((SECONDS-START))
+printf '\n%s%s▤ PROCESS%s\n' "$HU" "$B" "$N"
+printf '  ① blind answers   %6s   2 calls, parallel\n' "$(fmt "$P1")"
+printf '  ② cross-check     %6s   %s turn(s), one call each\n' "$(fmt "$P2")" "$TURNS"
+printf '  ③ two finals      %6s   2 calls, parallel\n' "$(fmt "$P3")"
+printf '  %stotal %s · %s model calls · both agents read-only%s\n' "$GY" "$(fmt "$TOTAL")" "$CALLS" "$N"
+
+mkdir -p "$DUO_HOME"; OUT="$DUO_HOME/$(date +%Y%m%d-%H%M%S).md"
+{ printf '# duo: %s\n\n## Discussion\n%s\n\n## Final answer (Claude)\n\n%s\n\n## Final answer (Codex)\n\n%s\n' "$Q" "$(cat "$LOG")" "$FCL" "$FCX"; } > "$OUT"
+printf '\n%s💾 saved %s   copy: pbcopy < %s%s\n' "$GY" "${OUT/#$HOME/~}" "${OUT/#$HOME/~}" "$N"
